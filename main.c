@@ -1,11 +1,11 @@
 #include <mysql.h> //for mysql api
 #include <stdio.h> //input and output
-#include <stdlib.h>
+#include <stdlib.h> //for DMA
 #include <string.h> //handle string function
 #include <time.h>   //For date and time for bill
 
 #define MAX_BILL_ITEMS 100
-#define MAX_BILLS 5 // how many bills can be open at the same time
+#define MAX_BILLS 10 // how many bills can be open at the same time
 
 struct BillItem {
   int id;         // item id
@@ -24,9 +24,9 @@ struct Bill {
   int item_count;
 };
 
-// Array system with 5 pointers to store up to 5 bills in primary memory
+// Array system with 10 pointers to store up to 10 bills in primary memory
 // NULL means the slot is currently free
-struct Bill *bills[MAX_BILLS];
+struct Bill *bills[MAX_BILLS]; //Allocation
 
 void space();
 void admin_menu();
@@ -48,6 +48,8 @@ void finalize_bill(struct Bill *b);   // save to database + receipt
 void print_receipt(FILE *out, struct Bill *b, int invoice_id, float sub,
                    float pct, float disc, float grand);
 void free_bill(int slot); // free memory of a slot
+void view_all_invoices();
+void search_invoice();
 
 MYSQL *conn;
 MYSQL_RES *result;
@@ -97,6 +99,12 @@ int main() {
     switch (choice) {
     case 1: // billing desk (multiple open bills)
       billing_desk();
+      break;
+    case 2:
+      view_all_invoices();
+      break;
+    case 3:
+      search_invoice();
       break;
     case 4:
       if (role == 1) {
@@ -727,14 +735,17 @@ void menu_management() {
    -------------------------------------------------------- */
 void space() {
   int i;
-  for (i = 1; i < 50; i++)
+  for (i = 1; i < 30; i++)
     printf("\n");
 }
 
 int input() {
   int choice;
   printf("Select Option:");
-  scanf("%d", &choice);
+  if (scanf("%d", &choice) != 1) {
+    while (getchar() != '\n'); // clear buffer on invalid input
+    return -1;
+  }
   return choice;
 }
 
@@ -744,6 +755,99 @@ char *now(void) {
   time(&mytime);
   strftime(current_time, 100, "%Y/%m/%d %H:%M:%S", localtime(&mytime));
   return current_time;
+}
+
+/* --------------------------------------------------------
+   INVOICE VIEW & SEARCH
+   -------------------------------------------------------- */
+void view_all_invoices() {
+  printf("\n--- All Invoices ---\n");
+  if (mysql_query(conn, "SELECT i.invoice_id, c.customer_name, i.invoice_date, i.grand_total FROM invoice i LEFT JOIN customer c ON i.customer_id = c.customer_id ORDER BY i.invoice_id DESC")) {
+    fprintf(stderr, "Query failed: %s\n", mysql_error(conn));
+    return;
+  }
+  
+  MYSQL_RES *res = mysql_store_result(conn);
+  if (!res) return;
+  
+  printf("%-10s %-20s %-20s %-10s\n", "ID", "Customer", "Date", "Total");
+  printf("----------------------------------------------------------------\n");
+  MYSQL_ROW row;
+  while ((row = mysql_fetch_row(res))) {
+    printf("%-10s %-20s %-20s %-10s\n", row[0], row[1] ? row[1] : "Walk-in", row[2], row[3]);
+  }
+  mysql_free_result(res);
+}
+
+void search_invoice() {
+  int search_choice;
+  char query[512];
+  printf("\n--- Search Invoice ---\n");
+  printf("[1] Search by Invoice ID\n");
+  printf("[2] Search by Customer Phone\n");
+  search_choice = input();
+  
+  if (search_choice == 1) {
+    int inv_id;
+    printf("Enter Invoice ID: ");
+    if (scanf("%d", &inv_id) != 1) { while(getchar() != '\n'); puts("Invalid."); return; }
+    sprintf(query, "SELECT i.invoice_id, c.customer_name, i.invoice_date, i.grand_total, c.phone FROM invoice i LEFT JOIN customer c ON i.customer_id = c.customer_id WHERE i.invoice_id=%d", inv_id);
+  } else if (search_choice == 2) {
+    char phone[20];
+    printf("Enter Phone Number: ");
+    scanf("%19s", phone);
+    sprintf(query, "SELECT i.invoice_id, c.customer_name, i.invoice_date, i.grand_total, c.phone FROM invoice i LEFT JOIN customer c ON i.customer_id = c.customer_id WHERE c.phone='%s' ORDER BY i.invoice_id DESC LIMIT 1", phone);
+  } else {
+    printf("Invalid choice.\n");
+    return;
+  }
+  
+  if (mysql_query(conn, query)) {
+    fprintf(stderr, "Search query failed: %s\n", mysql_error(conn));
+    return;
+  }
+  
+  MYSQL_RES *res = mysql_store_result(conn);
+  MYSQL_ROW row = mysql_fetch_row(res);
+  if (!row) {
+    printf("No invoice found.\n");
+    mysql_free_result(res);
+    return;
+  }
+  
+  int invoice_id = atoi(row[0]);
+  char *cust_name = row[1] ? row[1] : "Walk-in";
+  char *date = row[2];
+  float grand_total = atof(row[3]);
+  char *phone_val = row[4] ? row[4] : "N/A";
+  mysql_free_result(res);
+
+  // Fetch items to reconstruct the receipt
+  sprintf(query, "SELECT m.item_name, ii.price, ii.quantity, ii.total FROM invoice_items ii JOIN menu m ON ii.item_id = m.item_id WHERE ii.invoice_id=%d", invoice_id);
+  
+  if (mysql_query(conn, query)) {
+    fprintf(stderr, "Items query failed.\n");
+    return;
+  }
+  
+  res = mysql_store_result(conn);
+  
+  printf("\n========== RECIEPT (RE-PRINT) ==========\n");
+  printf("Invoice #: %d\n", invoice_id);
+  printf("Date     : %s\n", date);
+  printf("Customer : %s\n", cust_name);
+  printf("Phone    : %s\n\n", phone_val);
+  printf("%-20s %-10s %-6s %-10s\n", "Item", "Price", "Qty", "Total");
+  printf("----------------------------------------------------\n");
+  
+  while ((row = mysql_fetch_row(res))) {
+    printf("%-20s %-10s %-6s %-10s\n", row[0], row[1], row[2], row[3]);
+  }
+  printf("----------------------------------------------------\n");
+  printf("Grand Total     : %.2f\n", grand_total);
+  printf("========================================\n");
+  
+  mysql_free_result(res);
 }
 
 /*
